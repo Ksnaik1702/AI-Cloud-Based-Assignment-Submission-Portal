@@ -1,0 +1,27 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function member(classId) { return firestore.exists(/databases/(default)/documents/classMembers/$(classId + '_' + request.auth.uid)); }
+    function teacher(classId) { return signedIn() && firestore.get(/databases/(default)/documents/classes/$(classId)).data.teacherUid == request.auth.uid; }
+    function allowedType() { return request.resource.contentType.matches('application/pdf|image/(png|jpeg)|application/vnd.openxmlformats-officedocument.wordprocessingml.document'); }
+
+    match /submissions/{classId}/{uid}/{assignmentId}/{fileName} {
+      allow create: if signedIn() && request.auth.uid == uid && member(classId)
+        && firestore.get(/databases/(default)/documents/assignments/$(assignmentId)).data.classId == classId
+        && request.resource.size <= 20 * 1024 * 1024 && allowedType();
+      allow read: if signedIn() && ((request.auth.uid == uid && member(classId)) || teacher(classId));
+      allow update: if false;
+      allow delete: if signedIn() && request.auth.uid == uid && member(classId)
+        && firestore.get(/databases/(default)/documents/assignments/$(assignmentId)).data.classId == classId
+        && firestore.get(/databases/(default)/documents/assignments/$(assignmentId)).data.allowResubmissions == true;
+    }
+
+    match /assignment-files/{teacherUid}/{classId}/{assignmentId}/{fileName} {
+      allow create: if signedIn() && request.auth.uid == teacherUid && teacher(classId)
+        && request.resource.size <= 20 * 1024 * 1024 && allowedType();
+      allow read: if signedIn() && (teacher(classId) || member(classId));
+      allow update, delete: if false;
+    }
+  }
+}

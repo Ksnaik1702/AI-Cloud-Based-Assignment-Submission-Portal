@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isTeacher() { return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher'; }
+    function isStudent() { return signedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'student'; }
+    function classTeacher(classId) { return signedIn() && get(/databases/$(database)/documents/classes/$(classId)).data.teacherUid == request.auth.uid; }
+    function classMember(classId) { return signedIn() && exists(/databases/$(database)/documents/classMembers/$(classId + '_' + request.auth.uid)); }
+    function assignmentClass(assignmentId) { return get(/databases/$(database)/documents/assignments/$(assignmentId)).data.classId; }
+    function assignmentAllowsResubmissions(assignmentId) { return get(/databases/$(database)/documents/assignments/$(assignmentId)).data.allowResubmissions == true; }
+    function assignmentGradingEnabled(assignmentId) { return get(/databases/$(database)/documents/assignments/$(assignmentId)).data.get('gradingEnabled', true) == true; }
+
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name','email','role','createdAt'])
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role in ['student','teacher'];
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.email == resource.data.email;
+      allow delete: if false;
+    }
+    match /classes/{classId} {
+      allow get: if signedIn() && (resource.data.teacherUid == request.auth.uid || classMember(classId));
+      allow list: if isTeacher() && resource.data.teacherUid == request.auth.uid;
+      allow create: if isTeacher() && request.resource.data.teacherUid == request.auth.uid
+        && request.resource.data.keys().hasOnly(['teacherUid','teacherName','name','subject','section','joinCode','createdAt']);
+      allow update, delete: if isTeacher() && resource.data.teacherUid == request.auth.uid;
+    }
+    match /classInvites/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if isTeacher() && request.resource.data.teacherUid == request.auth.uid
+        && request.resource.data.classId is string
+        && get(/databases/$(database)/documents/classes/$(request.resource.data.classId)).data.teacherUid == request.auth.uid;
+      allow update, delete: if isTeacher() && resource.data.teacherUid == request.auth.uid;
+    }
+    match /classMembers/{memberId} {
+      allow get, list: if signedIn() && (resource.data.userId == request.auth.uid || classTeacher(resource.data.classId));
+      allow create: if isStudent()
+        && request.resource.data.userId == request.auth.uid
+        && memberId == request.resource.data.classId + '_' + request.auth.uid
+        && request.resource.data.inviteCode is string
+        && get(/databases/$(database)/documents/classInvites/$(request.resource.data.inviteCode)).data.classId == request.resource.data.classId;
+      allow delete: if signedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+    match /assignments/{assignmentId} {
+      allow get, list: if classTeacher(resource.data.classId) || classMember(resource.data.classId);
+      allow create: if isTeacher() && request.resource.data.createdBy == request.auth.uid
+        && classTeacher(request.resource.data.classId)
+        && request.resource.data.keys().hasOnly(['classId','className','subject','title','description','deadline','maxMarks','gradingEnabled','allowResubmissions','createdBy','createdAt','attachment']);
+      allow update, delete: if isTeacher() && resource.data.createdBy == request.auth.uid && classTeacher(resource.data.classId);
+    }
+    match /submissions/{submissionId} {
+      allow get, list: if signedIn() && (resource.data.studentId == request.auth.uid || classTeacher(resource.data.classId));
+      allow create: if isStudent() && request.resource.data.studentId == request.auth.uid
+        && classMember(request.resource.data.classId)
+        && assignmentClass(request.resource.data.assignmentId) == request.resource.data.classId
+        && request.resource.data.marks == null && request.resource.data.feedback == null
+        && request.resource.data.keys().hasOnly(['receiptId','version','fileSha256','classId','assignmentId','assignmentTitle','courseName','studentId','studentName','fileName','filePath','fileSize','submittedAt','status','marks','feedback']);
+      allow update: if isTeacher() && classTeacher(resource.data.classId)
+        && resource.data.status != 'WITHDRAWN'
+        && assignmentGradingEnabled(resource.data.assignmentId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['marks','feedback','gradedAt','status'])
+        && request.resource.data.marks is number && request.resource.data.marks >= 0
+        && request.resource.data.feedback is string && request.resource.data.status == 'GRADED';
+      allow delete: if isStudent() && resource.data.studentId == request.auth.uid
+        && resource.data.status in ['SUBMITTED','LATE','WITHDRAWN']
+        && assignmentAllowsResubmissions(resource.data.assignmentId)
+        && classMember(resource.data.classId);
+    }
+  }
+}
